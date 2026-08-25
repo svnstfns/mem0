@@ -43,10 +43,16 @@ function metaStr(m: Memory, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
+function metaTopics(m: Memory): string[] {
+  const v = m.metadata?.topics;
+  return Array.isArray(v) ? v.map(String) : [];
+}
+
 export default function MemoriesPage() {
   const [userId, setUserId] = useState("");
   const [kindFilter, setKindFilter] = useState("all");
   const [projectFilter, setProjectFilter] = useState("");
+  const [topicFilter, setTopicFilter] = useState("");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
   const [page, setPage] = useState(0);
@@ -74,9 +80,14 @@ export default function MemoriesPage() {
   const filteredMemories = memories.filter((m) => {
     if (kindFilter !== "all" && metaStr(m, "kind") !== kindFilter) return false;
     const project = projectFilter.trim().toLowerCase();
-    if (!project) return true;
-    const own = metaStr(m, "project") || metaStr(m, "session_project");
-    return own.toLowerCase().includes(project);
+    if (project) {
+      const own = metaStr(m, "project") || metaStr(m, "session_project");
+      if (!own.toLowerCase().includes(project)) return false;
+    }
+    const topic = topicFilter.trim().toLowerCase();
+    if (topic && !metaTopics(m).some((t) => t.toLowerCase().includes(topic)))
+      return false;
+    return true;
   });
   const totalPages = Math.ceil(filteredMemories.length / PAGE_SIZE);
   const paginatedMemories = filteredMemories.slice(
@@ -122,6 +133,22 @@ export default function MemoriesPage() {
         ) : (
           <span className="text-xs text-onSurface-default-tertiary">--</span>
         ),
+    },
+    {
+      key: "metadata" as keyof Memory,
+      label: "Topics",
+      width: 140,
+      render: (_value: Memory[keyof Memory], row: Memory) => (
+        <span className="flex flex-wrap gap-1">
+          {metaTopics(row)
+            .slice(0, 3)
+            .map((t) => (
+              <Badge key={t} variant="outline" className="text-[10px]">
+                {t}
+              </Badge>
+            ))}
+        </span>
+      ),
     },
     {
       key: "metadata" as keyof Memory,
@@ -197,6 +224,15 @@ export default function MemoriesPage() {
             setPage(0);
           }}
           className="w-48"
+        />
+        <Input
+          placeholder="Filter by topic"
+          value={topicFilter}
+          onChange={(e) => {
+            setTopicFilter(e.target.value);
+            setPage(0);
+          }}
+          className="w-40"
         />
       </div>
 
