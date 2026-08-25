@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -43,6 +43,17 @@ function metaStr(m: Memory, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
+interface RelatedItem {
+  id: string;
+  snippet: string | null;
+  kind: string | null;
+  project: string | null;
+  expired: boolean | null;
+  relation: string;
+  outgoing: boolean;
+  confidence: number | null;
+}
+
 function metaTopics(m: Memory): string[] {
   const v = m.metadata?.topics;
   return Array.isArray(v) ? v.map(String) : [];
@@ -56,6 +67,7 @@ export default function MemoriesPage() {
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
   const [page, setPage] = useState(0);
+  const [related, setRelated] = useState<RelatedItem[]>([]);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
 
   const {
@@ -89,6 +101,25 @@ export default function MemoriesPage() {
       return false;
     return true;
   });
+  useEffect(() => {
+    if (!selectedMemory) {
+      setRelated([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get(`/memories/${selectedMemory.id}/related`, { params: { depth: 1 } })
+      .then((res) => {
+        if (!cancelled) setRelated(res.data?.results ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setRelated([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMemory]);
+
   const totalPages = Math.ceil(filteredMemories.length / PAGE_SIZE);
   const paginatedMemories = filteredMemories.slice(
     page * PAGE_SIZE,
@@ -378,6 +409,34 @@ export default function MemoriesPage() {
                     </div>
                   </div>
                 )}
+              {related.length > 0 && (
+                <div className="space-y-1">
+                  <Label className="text-xs text-onSurface-default-tertiary">
+                    Related ({related.length})
+                  </Label>
+                  <div className="space-y-1">
+                    {related.map((r) => {
+                      const target = memories.find((m) => m.id === r.id);
+                      return (
+                        <button
+                          key={`${r.relation}-${r.id}`}
+                          type="button"
+                          disabled={!target}
+                          onClick={() => target && setSelectedMemory(target)}
+                          className="block w-full text-left text-xs hover:bg-surface-default-tertiary rounded p-1"
+                        >
+                          <Badge variant="outline" className="text-[10px] mr-1">
+                            {r.outgoing ? `${r.relation} →` : `← ${r.relation}`}
+                          </Badge>
+                          <span className={r.expired ? "line-through opacity-60" : ""}>
+                            {r.snippet ?? r.id}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <Button
                 variant="outline"
                 size="sm"
