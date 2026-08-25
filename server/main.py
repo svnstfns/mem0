@@ -382,7 +382,7 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         raise upstream_error()
 
 
-ALL_MEMORIES_LIMIT = 1000
+ALL_MEMORIES_LIMIT = 5000
 _RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at", "expiration_date"}
 
 

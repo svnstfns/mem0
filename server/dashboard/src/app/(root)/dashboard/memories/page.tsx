@@ -7,6 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
 import { EmptyState } from "@/components/self-hosted/empty-state";
@@ -28,10 +36,17 @@ import { Memory } from "@/types/api";
 
 const PAGE_SIZE = 20;
 // Keep in sync with ALL_MEMORIES_LIMIT in server/main.py.
-const MEMORY_FETCH_LIMIT = 1000;
+const MEMORY_FETCH_LIMIT = 5000;
+
+function metaStr(m: Memory, key: string): string {
+  const v = m.metadata?.[key];
+  return typeof v === "string" ? v : "";
+}
 
 export default function MemoriesPage() {
   const [userId, setUserId] = useState("");
+  const [kindFilter, setKindFilter] = useState("all");
+  const [projectFilter, setProjectFilter] = useState("");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
   const [page, setPage] = useState(0);
@@ -53,8 +68,18 @@ export default function MemoriesPage() {
     { errorToast: "Failed to load memories", initialData: [] },
   );
 
-  const totalPages = Math.ceil(memories.length / PAGE_SIZE);
-  const paginatedMemories = memories.slice(
+  const kinds = Array.from(
+    new Set(memories.map((m) => metaStr(m, "kind")).filter(Boolean)),
+  ).sort();
+  const filteredMemories = memories.filter((m) => {
+    if (kindFilter !== "all" && metaStr(m, "kind") !== kindFilter) return false;
+    const project = projectFilter.trim().toLowerCase();
+    if (!project) return true;
+    const own = metaStr(m, "project") || metaStr(m, "session_project");
+    return own.toLowerCase().includes(project);
+  });
+  const totalPages = Math.ceil(filteredMemories.length / PAGE_SIZE);
+  const paginatedMemories = filteredMemories.slice(
     page * PAGE_SIZE,
     (page + 1) * PAGE_SIZE,
   );
@@ -85,8 +110,30 @@ export default function MemoriesPage() {
         <span className="line-clamp-2 text-sm">{value}</span>
       ),
     },
-    { key: "user_id" as keyof Memory, label: "User", width: 100 },
-    { key: "agent_id" as keyof Memory, label: "Agent", width: 100 },
+    {
+      key: "metadata" as keyof Memory,
+      label: "Kind",
+      width: 90,
+      render: (_value: Memory[keyof Memory], row: Memory) =>
+        metaStr(row, "kind") ? (
+          <Badge variant="secondary" className="text-xs">
+            {metaStr(row, "kind")}
+          </Badge>
+        ) : (
+          <span className="text-xs text-onSurface-default-tertiary">--</span>
+        ),
+    },
+    {
+      key: "metadata" as keyof Memory,
+      label: "Project",
+      width: 120,
+      render: (_value: Memory[keyof Memory], row: Memory) => (
+        <span className="text-xs">
+          {metaStr(row, "project") ||
+            (metaStr(row, "scope") === "global" ? "global" : "--")}
+        </span>
+      ),
+    },
     {
       key: "created_at" as keyof Memory,
       label: "Created",
@@ -122,6 +169,34 @@ export default function MemoriesPage() {
             }
           }}
           className="w-64"
+        />
+        <Select
+          value={kindFilter}
+          onValueChange={(v) => {
+            setKindFilter(v);
+            setPage(0);
+          }}
+        >
+          <SelectTrigger className="w-40">
+            <SelectValue placeholder="Kind" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All kinds</SelectItem>
+            {kinds.map((k) => (
+              <SelectItem key={k} value={k}>
+                {k}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          placeholder="Filter by project"
+          value={projectFilter}
+          onChange={(e) => {
+            setProjectFilter(e.target.value);
+            setPage(0);
+          }}
+          className="w-48"
         />
       </div>
 
@@ -166,8 +241,8 @@ export default function MemoriesPage() {
             <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
               <span>
                 {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, memories.length)} of{" "}
-                {memories.length}
+                {Math.min((page + 1) * PAGE_SIZE, filteredMemories.length)} of{" "}
+                {filteredMemories.length}
               </span>
               <div className="flex gap-2">
                 <Button
@@ -249,6 +324,24 @@ export default function MemoriesPage() {
                   </div>
                 )}
               </div>
+              {selectedMemory.metadata &&
+                Object.keys(selectedMemory.metadata).length > 0 && (
+                  <div className="space-y-1">
+                    <Label className="text-xs text-onSurface-default-tertiary">
+                      Metadata
+                    </Label>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      {Object.entries(selectedMemory.metadata).map(([k, v]) => (
+                        <p key={k} className="text-xs break-all">
+                          <span className="text-onSurface-default-tertiary">
+                            {k}:{" "}
+                          </span>
+                          {String(v)}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                )}
               <Button
                 variant="outline"
                 size="sm"

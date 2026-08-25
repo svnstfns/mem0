@@ -5,6 +5,7 @@ export interface Memory {
   agent_id?: string;
   created_at?: string;
   updated_at?: string;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface ApiKey {
