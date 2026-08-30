@@ -5,6 +5,8 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 from mem0.vector_stores.pgvector import (
+    _POOL_ERRORS,
+    OperationalError,
     PGVector,
     _build_filter_conditions,
     _with_sslmode,
@@ -62,6 +64,7 @@ class TestPGVector(unittest.TestCase):
             min_size=1,
             max_size=4,
             open=False,
+            check=mock_psycopg_pool.check_connection,
         )
         mock_pool_instance.open.assert_called_once_with(wait=False)
         # No DB calls during __init__ — collection setup is deferred.
@@ -1890,8 +1893,11 @@ class TestPGVector(unittest.TestCase):
         mock_pool = MagicMock()
         mock_connection_pool.return_value = mock_pool
 
-        # Set up mock connection that will raise an error only on delete
+        # Set up mock connection that will raise an error only on delete.
+        # closed=0 mirrors a live psycopg2 connection so the rollback guard runs.
         mock_conn = MagicMock()
+        mock_conn.closed = 0
+        mock_conn.broken = False
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
         mock_pool.getconn.return_value = mock_conn
@@ -2155,7 +2161,8 @@ class TestPGVector(unittest.TestCase):
             conninfo=expected_conn_string,
             min_size=1,
             max_size=4,
-            open=False
+            open=False,
+            check=mock_connection_pool.check_connection,
         )
         mock_pool.open.assert_called_once_with(wait=False)
         self.assertEqual(pgvector.collection_name, "test_collection")
@@ -2333,6 +2340,130 @@ class TestPGVector(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         pass
+
+
+class TestPGVectorStaleConnectionHardening(unittest.TestCase):
+    """Hardening against pooled connections the server closed while they sat idle."""
+
+    def _make_pgvector(self, mock_connection_pool):
+        mock_pool = MagicMock()
+        mock_connection_pool.return_value = mock_pool
+        pgvector = PGVector(
+            dbname="test_db",
+            collection_name="test_collection",
+            embedding_model_dims=3,
+            user="test_user",
+            password="test_pass",
+            host="localhost",
+            port=5432,
+            diskann=False,
+            hnsw=False,
+        )
+        pgvector._collection_ensured = True
+        return pgvector
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    def test_pool_checks_connections_at_checkout_psycopg3(self, mock_connection_pool):
+        """The pool must validate connections at checkout (psycopg's pool_pre_ping equivalent)."""
+        self._make_pgvector(mock_connection_pool)
+        call_kwargs = mock_connection_pool.call_args.kwargs
+        self.assertIs(call_kwargs.get("check"), mock_connection_pool.check_connection)
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    @patch.object(PGVector, "_get_cursor")
+    def test_read_is_retried_once_on_stale_connection(self, mock_get_cursor, mock_connection_pool):
+        pgvector = self._make_pgvector(mock_connection_pool)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("id-1", {"key": "value"})
+        good_cm = MagicMock()
+        good_cm.__enter__.return_value = cursor
+        good_cm.__exit__.return_value = None
+        mock_get_cursor.side_effect = [
+            OperationalError("consuming input failed: server closed the connection unexpectedly"),
+            good_cm,
+        ]
+
+        result = pgvector.get("id-1")
+
+        self.assertEqual(result.id, "id-1")
+        self.assertEqual(result.payload, {"key": "value"})
+        self.assertEqual(mock_get_cursor.call_count, 2)
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    @patch.object(PGVector, "_get_cursor")
+    def test_read_fails_when_retry_also_hits_a_dead_connection(self, mock_get_cursor, mock_connection_pool):
+        pgvector = self._make_pgvector(mock_connection_pool)
+        mock_get_cursor.side_effect = OperationalError("the connection is lost")
+
+        with self.assertRaises(OperationalError):
+            pgvector.get("id-1")
+
+        self.assertEqual(mock_get_cursor.call_count, 2)
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    @patch.object(PGVector, "_get_cursor")
+    def test_write_is_not_retried(self, mock_get_cursor, mock_connection_pool):
+        """A retried write could apply twice; writes must fail on the first error."""
+        pgvector = self._make_pgvector(mock_connection_pool)
+        mock_get_cursor.side_effect = OperationalError("the connection is lost")
+
+        with self.assertRaises(OperationalError):
+            pgvector.delete("id-1")
+
+        self.assertEqual(mock_get_cursor.call_count, 1)
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    @patch.object(PGVector, "_get_cursor")
+    def test_pool_errors_are_not_retried(self, mock_get_cursor, mock_connection_pool):
+        """Pool exhaustion/timeout already waited inside the pool; retrying doubles the wait."""
+        pgvector = self._make_pgvector(mock_connection_pool)
+        pool_error = _POOL_ERRORS[-1]("couldn't get a connection after 30.0 sec")
+        mock_get_cursor.side_effect = pool_error
+
+        with self.assertRaises(type(pool_error)):
+            pgvector.get("id-1")
+
+        self.assertEqual(mock_get_cursor.call_count, 1)
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    def test_no_rollback_on_broken_connection_psycopg3(self, mock_connection_pool):
+        """Rolling back a dead connection raises a second error that masks the original."""
+        pgvector = self._make_pgvector(mock_connection_pool)
+        conn = MagicMock()
+        conn.closed = False
+        conn.broken = True
+        conn_cm = pgvector.connection_pool.connection.return_value
+        conn_cm.__enter__.return_value = conn
+        conn_cm.__exit__.return_value = None
+
+        with self.assertRaises(OperationalError):
+            with pgvector._get_cursor() as _:
+                raise OperationalError("consuming input failed: server closed the connection unexpectedly")
+
+        conn.rollback.assert_not_called()
+
+    @patch("mem0.vector_stores.pgvector.PSYCOPG_VERSION", 3)
+    @patch("mem0.vector_stores.pgvector.ConnectionPool")
+    def test_rollback_still_happens_on_usable_connection_psycopg3(self, mock_connection_pool):
+        pgvector = self._make_pgvector(mock_connection_pool)
+        conn = MagicMock()
+        conn.closed = False
+        conn.broken = False
+        conn_cm = pgvector.connection_pool.connection.return_value
+        conn_cm.__enter__.return_value = conn
+        conn_cm.__exit__.return_value = None
+
+        with self.assertRaises(ValueError):
+            with pgvector._get_cursor() as _:
+                raise ValueError("query-level error")
+
+        conn.rollback.assert_called_once()
 
 
 class TestBuildFilterConditions(unittest.TestCase):

@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import re
@@ -9,18 +10,21 @@ from pydantic import BaseModel
 
 # Try to import psycopg (psycopg3) first, then fall back to psycopg2
 try:
-    from psycopg import sql
+    from psycopg import OperationalError, sql
     from psycopg.types.json import Json
-    from psycopg_pool import ConnectionPool
+    from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
     PSYCOPG_VERSION = 3
+    _POOL_ERRORS = (PoolClosed, PoolTimeout)
     logger = logging.getLogger(__name__)
     logger.info("Using psycopg (psycopg3) with ConnectionPool for PostgreSQL connections")
 except ImportError:
     try:
-        from psycopg2 import sql
+        from psycopg2 import OperationalError, sql
         from psycopg2.extras import Json, execute_values
+        from psycopg2.pool import PoolError
         from psycopg2.pool import ThreadedConnectionPool as ConnectionPool
         PSYCOPG_VERSION = 2
+        _POOL_ERRORS = (PoolError,)
         logger = logging.getLogger(__name__)
         logger.info("Using psycopg2 with ThreadedConnectionPool for PostgreSQL connections")
     except ImportError:
@@ -119,6 +123,42 @@ def _build_filter_conditions(filters):
     return conditions, params
 
 
+def _retry_read_once(method):
+    """Retry a read-only operation once when the pooled connection turns out to be dead.
+
+    The pool's checkout check catches connections the server closed while they sat
+    idle, but a connection can still die between checkout and query. Pool management
+    errors (exhausted/closed/timeout) are not retried - the pool already waited.
+    Write paths must not use this: a retried write could apply twice.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except OperationalError as exc:
+            if isinstance(exc, _POOL_ERRORS):
+                raise
+            logger.warning(
+                "Lost PostgreSQL connection during %s (%s); retrying once with a fresh connection",
+                method.__name__,
+                exc,
+            )
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _safe_rollback(conn) -> None:
+    """Roll back if the connection is still usable, without masking the original error."""
+    if getattr(conn, "closed", False) or getattr(conn, "broken", False):
+        return
+    try:
+        conn.rollback()
+    except Exception:
+        logger.warning("Rollback failed; connection is being discarded", exc_info=True)
+
+
 def _with_sslmode(connection_string: str, sslmode: str) -> str:
     """Add or replace sslmode in URI and keyword conninfo strings.
 
@@ -201,12 +241,15 @@ class PGVector(VectorStoreBase):
         
         if self.connection_pool is None:
             if PSYCOPG_VERSION == 3:
-                # open=False avoids blocking when DB DNS is not yet resolvable (e.g. Docker startup)
+                # open=False avoids blocking when DB DNS is not yet resolvable (e.g. Docker startup).
+                # check validates pooled connections at checkout, so one the server closed while
+                # idle is replaced instead of failing the request with OperationalError.
                 self.connection_pool = ConnectionPool(
                     conninfo=connection_string,
                     min_size=minconn,
                     max_size=maxconn,
                     open=False,
+                    check=ConnectionPool.check_connection,
                 )
                 self.connection_pool.open(wait=False)
             else:
@@ -236,7 +279,9 @@ class PGVector(VectorStoreBase):
                         if commit:
                             conn.commit()
                     except Exception:
-                        conn.rollback()
+                        # Rolling back a dead connection would raise a second
+                        # OperationalError and mask the original one.
+                        _safe_rollback(conn)
                         logger.error("Error in cursor context (psycopg3)", exc_info=True)
                         raise
         else:
@@ -248,7 +293,7 @@ class PGVector(VectorStoreBase):
                 if commit:
                     conn.commit()
             except Exception as exc:
-                conn.rollback()
+                _safe_rollback(conn)
                 logger.error(f"Error occurred: {exc}")
                 raise exc
             finally:
@@ -328,6 +373,7 @@ class PGVector(VectorStoreBase):
                     data,
                 )
 
+    @_retry_read_once
     def search(
         self,
         query: str,
@@ -450,6 +496,7 @@ class PGVector(VectorStoreBase):
                     )
 
 
+    @_retry_read_once
     def get(self, vector_id: str) -> OutputData:
         """
         Retrieve a vector by ID.
@@ -471,6 +518,7 @@ class PGVector(VectorStoreBase):
                 return None
             return OutputData(id=str(result[0]), score=None, payload=result[1])
 
+    @_retry_read_once
     def list_cols(self) -> List[str]:
         """
         List all collections.
@@ -487,6 +535,7 @@ class PGVector(VectorStoreBase):
         with self._get_cursor(commit=True) as cur:
             cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(self._col()))
 
+    @_retry_read_once
     def col_info(self) -> dict[str, Any]:
         """
         Get information about a collection.
@@ -510,6 +559,7 @@ class PGVector(VectorStoreBase):
             result = cur.fetchone()
         return {"name": result[0], "count": result[1], "size": result[2]}
 
+    @_retry_read_once
     def list(
         self,
         filters: Optional[dict] = None,
