@@ -24,6 +24,41 @@ _BAD_REQUEST_NAMES = {"BadRequestError", "UnprocessableEntityError"}
 _DB_NAMES = {"OperationalError", "DBAPIError", "DisconnectionError"}
 _VECTOR_NAMES = {"UnexpectedResponse", "ResponseHandlingException"}
 
+# Marks a provider 4xx as a billing/credit problem rather than a malformed request
+# (Anthropic 400: "Your credit balance is too low ... Plans & Billing"; OpenAI 429:
+# code "insufficient_quota", "... check your plan and billing details").
+_BILLING_MARKERS = ("credit balance", "insufficient_quota", "billing", "purchase credits", "payment required")
+_PROVIDER_MESSAGE_LIMIT = 300
+
+
+def _provider_message(exc: BaseException) -> str:
+    # anthropic/openai SDK errors carry the parsed response in `body`; prefer its
+    # message over str(exc), which prepends "Error code: NNN - {raw dict}".
+    message = ""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            message = error["message"]
+        elif isinstance(body.get("message"), str):
+            message = body["message"]
+    message = message or str(exc).strip() or type(exc).__name__
+    if len(message) > _PROVIDER_MESSAGE_LIMIT:
+        message = message[: _PROVIDER_MESSAGE_LIMIT - 1] + "…"
+    return message
+
+
+def _is_billing(exc: BaseException) -> bool:
+    haystack = f"{_provider_message(exc)} {exc}".lower()
+    return any(marker in haystack for marker in _BILLING_MARKERS)
+
+
+def _billing_result(exc: BaseException) -> tuple[str, str]:
+    return (
+        "provider_billing",
+        f"Provider rejected the request due to a billing or credit issue: {_provider_message(exc)}",
+    )
+
 
 def _classify_one(exc: BaseException) -> tuple[str, str]:
     name = type(exc).__name__
@@ -36,6 +71,9 @@ def _classify_one(exc: BaseException) -> tuple[str, str]:
             "Provider rejected the request (authentication). "
             "Check your LLM provider API key on the Configuration page.",
         )
+    is_provider_4xx = name in _BAD_REQUEST_NAMES or name in _RATE_NAMES or status in (400, 402, 422, 429)
+    if is_provider_4xx and _is_billing(exc):
+        return _billing_result(exc)
     if name in _RATE_NAMES or status == 429:
         return ("provider_rate_limited", "Provider rate limit hit. Retry shortly.")
     if name in _TIMEOUT_NAMES or isinstance(exc, TimeoutError):
@@ -43,7 +81,7 @@ def _classify_one(exc: BaseException) -> tuple[str, str]:
     if name in _CONN_NAMES or (isinstance(status, int) and status >= 500):
         return ("provider_unavailable", "Provider is unreachable or returned a server error.")
     if name in _BAD_REQUEST_NAMES or status in (400, 422):
-        return ("provider_bad_request", "Provider rejected the request as malformed.")
+        return ("provider_bad_request", f"Provider rejected the request: {_provider_message(exc)}")
     if name in _DB_NAMES:
         return ("datastore_unavailable", "The memory database is unreachable.")
     if name in _VECTOR_NAMES or module.startswith("qdrant_client"):
@@ -61,6 +99,10 @@ def _classify(exc: BaseException | None) -> tuple[str, str]:
         if result[0] != "unknown":
             return result
         current = current.__cause__ or current.__context__
+    # Wrappers raised without a cause (e.g. mem0.exceptions.LLMError) only carry the
+    # provider text in their message: still surface billing problems distinctly.
+    if exc is not None and _is_billing(exc):
+        return _billing_result(exc)
     return ("unknown", "Upstream provider error.")
 
 
