@@ -6,6 +6,8 @@ provider exceptions are modeled as minimal stand-ins shaped like anthropic/opena
 
 from errors import upstream_error
 
+from mem0.exceptions import EmbeddingError
+
 
 class _ProviderError(Exception):
     def __init__(self, message: str, status_code: int | None = None, body: dict | None = None) -> None:
@@ -116,3 +118,35 @@ def test_auth_error_stays_auth_failed():
 def test_unrelated_wrapper_stays_unknown():
     err = _map(LLMError("LLM extraction failed: something odd"))
     assert err.code == "unknown"
+
+
+OPENAI_NO_CREDITS_MESSAGE = (
+    "You have no credits remaining. Add credits to continue using the API at "
+    "https://platform.openai.com/settings/organization/billing/."
+)
+
+
+def test_openai_no_credits_429_maps_to_provider_billing():
+    # Query embedding on 2026-09-12: 429 credit_balance_exhausted from POST /v1/embeddings.
+    body = {"error": {"message": OPENAI_NO_CREDITS_MESSAGE, "code": "credit_balance_exhausted"}}
+    err = _map(RateLimitError(f"Error code: 429 - {body}", 429, body))
+    assert err.code == "provider_billing"
+    assert OPENAI_NO_CREDITS_MESSAGE in err.detail
+
+
+def test_credit_balance_exhausted_code_alone_maps_to_provider_billing():
+    body = {"error": {"message": "Request rejected.", "code": "credit_balance_exhausted"}}
+    err = _map(RateLimitError(f"Error code: 429 - {body}", 429, body))
+    assert err.code == "provider_billing"
+
+
+def test_embedding_error_wrapping_no_credits_maps_to_provider_billing():
+    body = {"error": {"message": "You have no credits remaining.", "code": "credit_balance_exhausted"}}
+    try:
+        try:
+            raise RateLimitError(f"Error code: 429 - {body}", 429, body)
+        except RateLimitError as e:
+            raise EmbeddingError(f"Query embedding failed: {e}") from e
+    except EmbeddingError:
+        err = upstream_error()
+    assert err.code == "provider_billing"

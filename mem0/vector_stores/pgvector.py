@@ -412,7 +412,7 @@ class PGVector(VectorStoreBase):
             results = cur.fetchall()
         return [OutputData(id=str(r[0]), score=max(0.0, 1.0 - float(r[1])), payload=r[2]) for r in results]
 
-    def keyword_search(self, query, top_k=5, filters=None):
+    def keyword_search(self, query, top_k=5, filters=None, match_any=False):
         """
         Search using PostgreSQL full-text search on lemmatized text.
 
@@ -420,32 +420,44 @@ class PGVector(VectorStoreBase):
             query (str): The search query text.
             top_k (int, optional): Number of results to return. Defaults to 5.
             filters (dict, optional): Filters to apply to the search. Defaults to None.
+            match_any (bool, optional): Match rows containing any query term instead of all of them.
+                Defaults to False.
 
         Returns:
-            List[OutputData]: Search results ranked by text relevance.
+            List[OutputData]: Search results ranked by text relevance, or None if the query failed.
         """
         self._ensure_collection()
         filter_conditions, filter_params = _build_filter_conditions(filters)
         filter_clause = sql.SQL("AND " + " AND ".join(filter_conditions)) if filter_conditions else sql.SQL("")
 
+        if match_any:
+            terms = re.findall(r"\w+", query)
+            if not terms:
+                return []
+            # Quoted \w+ terms are always valid to_tsquery syntax, whatever the user typed.
+            query = " | ".join(f"'{term}'" for term in terms)
+            tsquery = sql.SQL("to_tsquery('simple', %s)")
+        else:
+            tsquery = sql.SQL("plainto_tsquery('simple', %s)")
+
         try:
             with self._get_cursor() as cur:
                 cur.execute(
                     sql.SQL("""
-                    SELECT id, ts_rank_cd(to_tsvector('simple', payload->>'text_lemmatized'), plainto_tsquery('simple', %s)) AS score, payload
-                    FROM {}
-                    WHERE to_tsvector('simple', payload->>'text_lemmatized') @@ plainto_tsquery('simple', %s)
-                    {}
+                    SELECT id, ts_rank_cd(to_tsvector('simple', payload->>'text_lemmatized'), {tsquery}) AS score, payload
+                    FROM {table}
+                    WHERE to_tsvector('simple', payload->>'text_lemmatized') @@ {tsquery}
+                    {filters}
                     ORDER BY score DESC
                     LIMIT %s
-                    """).format(self._col(), filter_clause),
+                    """).format(tsquery=tsquery, table=self._col(), filters=filter_clause),
                     (query, query, *filter_params, top_k),
                 )
 
                 results = cur.fetchall()
             return [OutputData(id=str(r[0]), score=float(r[1]), payload=r[2]) for r in results]
         except Exception as e:
-            logger.debug(f"Keyword search failed: {e}")
+            logger.warning(f"Keyword search failed: {e}")
             return None
 
     def delete(self, vector_id: str) -> None:
