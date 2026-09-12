@@ -28,6 +28,7 @@ from routers import entities as entities_router
 from routers import related as related_router
 from routers import requests as requests_router
 from schemas import MessageResponse
+from search_fallback import search_with_keyword_fallback
 from server_state import (
     get_current_config,
     get_memory_instance,
@@ -477,7 +478,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["explain"] = search_req.explain
         if search_req.show_expired is not None:
             params["show_expired"] = search_req.show_expired
-        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
+        return search_with_keyword_fallback(get_memory_instance(), search_req.query, filters, **params)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
