@@ -87,8 +87,15 @@ class LlmFactory:
             # Create default config with kwargs
             config = config_class(**kwargs)
         elif isinstance(config, dict):
-            # Merge dict config with kwargs
+            # Merge dict config with kwargs. Persisted server overrides carry the
+            # reasoning fields regardless of provider; drop them where the
+            # provider config does not accept them, as the BaseLlmConfig path does.
             config = {**config, **kwargs}
+            params = inspect.signature(config_class).parameters
+            accepts_kwargs = any(p.kind == p.VAR_KEYWORD for p in params.values())
+            for field in ("reasoning_effort", "is_reasoning_model"):
+                if field in config and not (accepts_kwargs or field in params):
+                    del config[field]
             config = config_class(**config)
         elif isinstance(config, BaseLlmConfig):
             # Convert base config to provider-specific config if needed

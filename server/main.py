@@ -8,7 +8,7 @@ import telemetry
 from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
 from db import SessionLocal
 from dotenv import load_dotenv
-from embedder_config import embedder_from_env
+from provider_config import embedder_from_env, llm_from_env
 from errors import (
     UpstreamError,
     install_request_id_logging,
@@ -114,9 +114,8 @@ POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
-DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-5-mini")
+DEFAULT_LLM = llm_from_env(os.environ, BUNDLED_LLM_PROVIDERS)
 DEFAULT_EMBEDDER, EMBEDDING_DIMS = embedder_from_env(os.environ, BUNDLED_EMBEDDER_PROVIDERS)
 
 DEFAULT_CONFIG = {
@@ -133,10 +132,7 @@ DEFAULT_CONFIG = {
             "embedding_model_dims": EMBEDDING_DIMS,
         },
     },
-    "llm": {
-        "provider": "openai",
-        "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL},
-    },
+    "llm": DEFAULT_LLM,
     "embedder": DEFAULT_EMBEDDER,
     "history_db_path": HISTORY_DB_PATH,
 }
