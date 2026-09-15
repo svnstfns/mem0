@@ -60,3 +60,23 @@ def test_dict_config_not_mutated_by_kwargs():
         LlmFactory.create("openai", config, api_key="secret")
 
     assert config == {"model": "gpt-4o-mini"}
+
+
+def test_dict_config_drops_reasoning_fields_for_providers_without_them():
+    # A persisted server override written for gpt-5-mini must not break a provider
+    # switch: AnthropicConfig has no reasoning fields and no **kwargs.
+    built = _capture_config(
+        "anthropic",
+        {"model": "claude-opus-5", "api_key": "k", "is_reasoning_model": True, "reasoning_effort": "high"},
+    )
+
+    assert isinstance(built, AnthropicConfig)
+    assert built.model == "claude-opus-5"
+    assert built.is_reasoning_model is None  # base default; the override value was dropped
+
+
+def test_dict_config_keeps_reasoning_fields_for_providers_with_them():
+    built = _capture_config("openai", {"model": "o3", "api_key": "k", "is_reasoning_model": True})
+
+    assert isinstance(built, OpenAIConfig)
+    assert built.is_reasoning_model is True
