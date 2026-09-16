@@ -31,6 +31,7 @@ class OllamaLLM(LLMBase):
                 enable_vision=config.enable_vision,
                 vision_details=config.vision_details,
                 http_client_proxies=config.http_client_proxies,
+                ollama_timeout=config.ollama_timeout,
             )
 
         super().__init__(config)
@@ -38,7 +39,10 @@ class OllamaLLM(LLMBase):
         if not self.config.model:
             self.config.model = "llama3.1:70b"
 
-        self.client = Client(host=self.config.ollama_base_url)
+        # httpx waits forever without a timeout, so an unresponsive Ollama hangs every caller.
+        # chat() is one blocking request, so this has to cover the cold model load plus the whole
+        # generation - hence a far more generous default than the embedder's.
+        self.client = Client(host=self.config.ollama_base_url, timeout=self.config.ollama_timeout)
 
     def _parse_response(self, response, tools):
         """

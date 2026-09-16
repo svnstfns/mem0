@@ -26,6 +26,8 @@ class BaseLlmConfig(ABC):
         reasoning_effort: Optional[str] = None,
         http_client_proxies: Optional[Union[Dict, str]] = None,
         is_reasoning_model: Optional[bool] = None,
+        # Ollama specific
+        ollama_timeout: Optional[float] = None,
     ):
         """
         Initialize a base configuration class instance for the LLM.
@@ -63,6 +65,8 @@ class BaseLlmConfig(ABC):
                 deployments with custom/versioned model names (e.g. Azure
                 "gpt-5.4-nano-2026-03-17") that the name-based heuristic cannot
                 recognize. Defaults to None
+            ollama_timeout: Request timeout in seconds for the Ollama API.
+                Defaults to None (wait forever)
         """
         self.model = model
         self.temperature = temperature
@@ -75,4 +79,5 @@ class BaseLlmConfig(ABC):
         self.reasoning_effort = reasoning_effort
         self.is_reasoning_model = is_reasoning_model
         self.http_client_proxies = http_client_proxies
+        self.ollama_timeout = ollama_timeout
         self.http_client = build_http_client(http_client_proxies)

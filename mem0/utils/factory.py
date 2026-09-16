@@ -120,6 +120,8 @@ class LlmFactory:
                     config_dict["reasoning_effort"] = config.reasoning_effort
                 if accepts_kwargs or "is_reasoning_model" in params:
                     config_dict["is_reasoning_model"] = config.is_reasoning_model
+                if accepts_kwargs or "ollama_timeout" in params:
+                    config_dict["ollama_timeout"] = config.ollama_timeout
                 config_dict.update(kwargs)
                 config = config_class(**config_dict)
             else:

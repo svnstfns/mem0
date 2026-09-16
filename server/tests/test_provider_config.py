@@ -5,11 +5,19 @@ import pytest
 from provider_config import embedder_from_env, llm_from_env
 
 LLM_BUNDLED = ("openai", "anthropic", "gemini")
+# ollama is not a bundled LLM provider in this image (see BUNDLED_LLM_PROVIDERS in server/main.py);
+# the timeout wiring below is what such a deployment would get once it is.
+LLM_BUNDLED_WITH_OLLAMA = (*LLM_BUNDLED, "ollama")
 EMBEDDER_BUNDLED = ("openai", "gemini", "ollama")
 OLLAMA_ENV = {
     "MEM0_DEFAULT_EMBEDDER_PROVIDER": "ollama",
     "MEM0_DEFAULT_EMBEDDER_MODEL": "bge-m3",
     "MEM0_EMBEDDING_DIMS": "1024",
+    "OLLAMA_BASE_URL": "http://ollama:11434",
+}
+OLLAMA_LLM_ENV = {
+    "MEM0_DEFAULT_LLM_PROVIDER": "ollama",
+    "MEM0_DEFAULT_LLM_MODEL": "llama3.1:70b",
     "OLLAMA_BASE_URL": "http://ollama:11434",
 }
 ANTHROPIC_ENV = {
@@ -108,5 +116,32 @@ def test_embedder_ollama_timeout_is_overridable() -> None:
 
 def test_embedder_openai_gets_no_ollama_timeout() -> None:
     config, _ = embedder_from_env({"OPENAI_API_KEY": "sk-test", "MEM0_EMBEDDER_TIMEOUT": "15"}, EMBEDDER_BUNDLED)
+
+    assert "ollama_timeout" not in config["config"]
+
+
+def test_llm_ollama_timeout_defaults_to_300s() -> None:
+    # The ollama client sets no httpx timeout on its own, and chat() is a single blocking
+    # request: without this an unresponsive runtime hangs every add instead of failing.
+    config = llm_from_env(OLLAMA_LLM_ENV, LLM_BUNDLED_WITH_OLLAMA)
+
+    assert config == {
+        "provider": "ollama",
+        "config": {
+            "model": "llama3.1:70b",
+            "ollama_base_url": "http://ollama:11434",
+            "ollama_timeout": 300.0,
+        },
+    }
+
+
+def test_llm_ollama_timeout_is_overridable() -> None:
+    config = llm_from_env({**OLLAMA_LLM_ENV, "MEM0_LLM_TIMEOUT": "90"}, LLM_BUNDLED_WITH_OLLAMA)
+
+    assert config["config"]["ollama_timeout"] == 90.0
+
+
+def test_llm_anthropic_gets_no_ollama_timeout() -> None:
+    config = llm_from_env({**ANTHROPIC_ENV, "MEM0_LLM_TIMEOUT": "90"}, LLM_BUNDLED)
 
     assert "ollama_timeout" not in config["config"]

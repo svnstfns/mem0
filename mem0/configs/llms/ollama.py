@@ -23,6 +23,7 @@ class OllamaConfig(BaseLlmConfig):
         http_client_proxies: Optional[dict] = None,
         # Ollama-specific parameters
         ollama_base_url: Optional[str] = None,
+        ollama_timeout: Optional[float] = None,
     ):
         """
         Initialize Ollama configuration.
@@ -38,6 +39,7 @@ class OllamaConfig(BaseLlmConfig):
             vision_details: Vision detail level, defaults to "auto"
             http_client_proxies: HTTP client proxy settings, defaults to None
             ollama_base_url: Ollama base URL, defaults to None
+            ollama_timeout: Request timeout in seconds, defaults to None (wait forever)
         """
         # Initialize base parameters
         super().__init__(
@@ -50,6 +52,7 @@ class OllamaConfig(BaseLlmConfig):
             enable_vision=enable_vision,
             vision_details=vision_details,
             http_client_proxies=http_client_proxies,
+            ollama_timeout=ollama_timeout,
         )
 
         # Ollama-specific parameters
