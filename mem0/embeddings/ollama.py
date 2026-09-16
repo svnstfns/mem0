@@ -16,7 +16,9 @@ class OllamaEmbedding(EmbeddingBase):
         self.config.model = self.config.model or "nomic-embed-text"
         self.config.embedding_dims = self.config.embedding_dims or 512
 
-        self.client = Client(host=self.config.ollama_base_url)
+        # httpx waits forever without a timeout, so a hung Ollama hangs every caller - and the
+        # query embedding is created before any retrieval, so that is a whole search.
+        self.client = Client(host=self.config.ollama_base_url, timeout=self.config.ollama_timeout)
         self._ensure_model_exists()
 
     @staticmethod
@@ -34,7 +36,13 @@ class OllamaEmbedding(EmbeddingBase):
             or self._normalize_model_name(model.get("model", "")) == target
             for model in local_models
         ):
-            self.client.pull(self.config.model)
+            # pull() is one blocking request for the entire download, so the embed timeout would
+            # abort every real pull. Give it a client of its own that waits.
+            puller = Client(host=self.config.ollama_base_url)
+            try:
+                puller.pull(self.config.model)
+            finally:
+                puller.close()
 
     def embed(self, text, memory_action: Optional[Literal["add", "search", "update"]] = None):
         """

@@ -61,7 +61,12 @@ def test_embedder_ollama_gets_base_url_and_no_openai_key() -> None:
 
     assert config == {
         "provider": "ollama",
-        "config": {"model": "bge-m3", "embedding_dims": 1024, "ollama_base_url": "http://ollama:11434"},
+        "config": {
+            "model": "bge-m3",
+            "embedding_dims": 1024,
+            "ollama_base_url": "http://ollama:11434",
+            "ollama_timeout": 60.0,
+        },
     }
     assert dims == 1024
 
@@ -85,3 +90,23 @@ def test_embedder_non_openai_provider_requires_model_and_dims(missing: str) -> N
 def test_embedder_unbundled_provider_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="not bundled"):
         embedder_from_env({**OLLAMA_ENV, "MEM0_DEFAULT_EMBEDDER_PROVIDER": "huggingface"}, EMBEDDER_BUNDLED)
+
+
+def test_embedder_ollama_timeout_defaults_to_60s() -> None:
+    # The ollama client sets no httpx timeout on its own; without this a hung runtime
+    # would hang /search instead of failing over to keyword-only search.
+    config, _ = embedder_from_env(OLLAMA_ENV, EMBEDDER_BUNDLED)
+
+    assert config["config"]["ollama_timeout"] == 60.0
+
+
+def test_embedder_ollama_timeout_is_overridable() -> None:
+    config, _ = embedder_from_env({**OLLAMA_ENV, "MEM0_EMBEDDER_TIMEOUT": "15"}, EMBEDDER_BUNDLED)
+
+    assert config["config"]["ollama_timeout"] == 15.0
+
+
+def test_embedder_openai_gets_no_ollama_timeout() -> None:
+    config, _ = embedder_from_env({"OPENAI_API_KEY": "sk-test", "MEM0_EMBEDDER_TIMEOUT": "15"}, EMBEDDER_BUNDLED)
+
+    assert "ollama_timeout" not in config["config"]

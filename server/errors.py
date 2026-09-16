@@ -18,8 +18,23 @@ class UpstreamError(HTTPException):
 
 _AUTH_NAMES = {"AuthenticationError", "PermissionDeniedError"}
 _RATE_NAMES = {"RateLimitError"}
-_TIMEOUT_NAMES = {"APITimeoutError"}
-_CONN_NAMES = {"APIConnectionError", "ConnectionError"}
+# The ollama client only translates httpx.ConnectError and httpx.HTTPStatusError; every other
+# transport failure reaches us as the raw httpx (or httpcore) exception, which shares these names.
+# httpx.ConnectTimeout is not a ConnectError subclass, so it needs the timeout branch too.
+_TIMEOUT_NAMES = {"APITimeoutError", "TimeoutException", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout"}
+_CONN_NAMES = {
+    "APIConnectionError",
+    "ConnectionError",
+    "ConnectError",
+    "ReadError",
+    "WriteError",
+    "RemoteProtocolError",
+}
+# A 404 from a provider means the configured model does not exist there: ollama raises
+# ResponseError("model '<m>' not found", 404) once the model is gone from the runtime,
+# anthropic/openai a NotFoundError for an unknown model id. Matched by name as well as
+# status so an HTTP-layer 404 (a memory that does not exist) cannot land here.
+_MODEL_MISSING_NAMES = {"NotFoundError", "ResponseError"}
 _BAD_REQUEST_NAMES = {"BadRequestError", "UnprocessableEntityError"}
 _DB_NAMES = {"OperationalError", "DBAPIError", "DisconnectionError"}
 _VECTOR_NAMES = {"UnexpectedResponse", "ResponseHandlingException", "VectorStoreError"}
@@ -87,6 +102,11 @@ def _classify_one(exc: BaseException) -> tuple[str, str]:
         return ("provider_rate_limited", "Provider rate limit hit. Retry shortly.")
     if name in _TIMEOUT_NAMES or isinstance(exc, TimeoutError):
         return ("provider_timeout", "Provider timed out. Retry shortly.")
+    if name in _MODEL_MISSING_NAMES and status == 404:
+        return (
+            "provider_model_missing",
+            f"Provider does not have the configured model: {_provider_message(exc)}",
+        )
     if name in _CONN_NAMES or (isinstance(status, int) and status >= 500):
         return ("provider_unavailable", "Provider is unreachable or returned a server error.")
     if name in _BAD_REQUEST_NAMES or status in (400, 422):

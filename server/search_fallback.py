@@ -14,9 +14,18 @@ from errors import classify, request_id_var
 from mem0.exceptions import EmbeddingError
 
 # provider_bad_request is deliberately missing: a rejected request is a caller or configuration
-# bug, and falling back would hide it.
+# bug, and falling back would hide it. provider_model_missing is a configuration bug too, but a
+# deployment-wide and permanent one - failing hard would leave recall dead until someone notices,
+# so it degrades instead and names itself in `degraded.code` and the warning.
 KEYWORD_FALLBACK_CODES = frozenset(
-    {"provider_auth_failed", "provider_billing", "provider_rate_limited", "provider_timeout", "provider_unavailable"}
+    {
+        "provider_auth_failed",
+        "provider_billing",
+        "provider_model_missing",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_unavailable",
+    }
 )
 
 

@@ -1,7 +1,7 @@
 import builtins
 import importlib
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -119,3 +119,42 @@ def test_missing_ollama_raises_actionable_import_error(monkeypatch):
 
     mock_input.assert_not_called()
     mock_exit.assert_not_called()
+
+
+def test_embed_client_gets_the_configured_timeout():
+    with patch("mem0.embeddings.ollama.Client") as mock_ollama:
+        mock_client = Mock()
+        mock_client.list.return_value = {"models": [{"name": "nomic-embed-text"}]}
+        mock_ollama.return_value = mock_client
+
+        OllamaEmbedding(BaseEmbedderConfig(model="nomic-embed-text", embedding_dims=512, ollama_timeout=60.0))
+
+        mock_ollama.assert_called_once_with(host=None, timeout=60.0)
+
+
+def test_embed_client_without_configured_timeout_keeps_waiting():
+    with patch("mem0.embeddings.ollama.Client") as mock_ollama:
+        mock_client = Mock()
+        mock_client.list.return_value = {"models": [{"name": "nomic-embed-text"}]}
+        mock_ollama.return_value = mock_client
+
+        OllamaEmbedding(BaseEmbedderConfig(model="nomic-embed-text", embedding_dims=512))
+
+        mock_ollama.assert_called_once_with(host=None, timeout=None)
+
+
+def test_pull_uses_a_client_without_the_embed_timeout():
+    """pull() is one blocking request for the whole download - the embed timeout would abort it."""
+    with patch("mem0.embeddings.ollama.Client") as mock_ollama:
+        mock_client = Mock()
+        mock_client.list.return_value = {"models": []}
+        mock_ollama.return_value = mock_client
+
+        OllamaEmbedding(BaseEmbedderConfig(model="nomic-embed-text", embedding_dims=512, ollama_timeout=60.0))
+
+        assert mock_ollama.call_args_list == [
+            call(host=None, timeout=60.0),
+            call(host=None),
+        ]
+        mock_client.pull.assert_called_once_with("nomic-embed-text")
+        mock_client.close.assert_called_once()
