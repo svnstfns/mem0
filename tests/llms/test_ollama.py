@@ -2,8 +2,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from mem0.configs.llms.base import BaseLlmConfig
 from mem0.configs.llms.ollama import OllamaConfig
 from mem0.llms.ollama import OllamaLLM
+from mem0.utils.factory import LlmFactory
 
 
 @pytest.fixture
@@ -140,3 +142,35 @@ def test_parse_response_with_tools_object_style(mock_ollama_client):
     result = llm._parse_response(mock_response, tools)
 
     assert result["tool_calls"] == [{"name": "extract", "arguments": {"entities": ["Alice"]}}]
+
+
+def test_chat_client_gets_the_configured_timeout():
+    with patch("mem0.llms.ollama.Client") as mock_ollama:
+        OllamaLLM(
+            OllamaConfig(model="llama3.1:70b", ollama_base_url="http://ollama:11434", ollama_timeout=300.0)
+        )
+
+        mock_ollama.assert_called_once_with(host="http://ollama:11434", timeout=300.0)
+
+
+def test_chat_client_without_configured_timeout_keeps_waiting():
+    with patch("mem0.llms.ollama.Client") as mock_ollama:
+        OllamaLLM(OllamaConfig(model="llama3.1:70b"))
+
+        mock_ollama.assert_called_once_with(host=None, timeout=None)
+
+
+def test_base_config_timeout_survives_the_conversion_to_ollama_config():
+    """OllamaLLM rebuilds a BaseLlmConfig field by field - the timeout must not be dropped there."""
+    with patch("mem0.llms.ollama.Client") as mock_ollama:
+        OllamaLLM(BaseLlmConfig(model="llama3.1:70b", ollama_timeout=300.0))
+
+        mock_ollama.assert_called_once_with(host=None, timeout=300.0)
+
+
+def test_factory_forwards_the_timeout_to_the_ollama_client():
+    """LlmFactory does its own BaseLlmConfig -> OllamaConfig conversion, with the same risk."""
+    with patch("mem0.llms.ollama.Client") as mock_ollama:
+        LlmFactory.create("ollama", BaseLlmConfig(model="llama3.1:70b", ollama_timeout=300.0))
+
+        mock_ollama.assert_called_once_with(host=None, timeout=300.0)

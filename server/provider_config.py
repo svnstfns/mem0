@@ -18,6 +18,11 @@ OLLAMA_DEFAULT_BASE_URL = "http://ollama:11434"
 # forever. 60s leaves room for a cold model load into VRAM and still fails fast enough for the
 # keyword fallback to take over.
 OLLAMA_DEFAULT_EMBEDDER_TIMEOUT = 60.0
+# A generation legitimately takes far longer than an embedding, and ollama answers chat() in a
+# single blocking response, so this timeout has to cover the cold model load into VRAM plus the
+# whole generation. 300s does that and still fails instead of hanging an add forever - and unlike
+# a failed embedding there is no keyword fallback to catch it.
+OLLAMA_DEFAULT_LLM_TIMEOUT = 300.0
 API_KEY_VARS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
 
 
@@ -46,6 +51,7 @@ def llm_from_env(env: Mapping[str, str], bundled: Tuple[str, ...]) -> Dict[str, 
         config["max_tokens"] = int(env["MEM0_LLM_MAX_TOKENS"])
     if provider == "ollama":
         config["ollama_base_url"] = env.get("OLLAMA_BASE_URL", OLLAMA_DEFAULT_BASE_URL)
+        config["ollama_timeout"] = float(env.get("MEM0_LLM_TIMEOUT") or OLLAMA_DEFAULT_LLM_TIMEOUT)
     return {"provider": provider, "config": config}
 
 
