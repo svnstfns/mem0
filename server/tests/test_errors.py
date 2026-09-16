@@ -150,3 +150,94 @@ def test_embedding_error_wrapping_no_credits_maps_to_provider_billing():
     except EmbeddingError:
         err = upstream_error()
     assert err.code == "provider_billing"
+
+
+class NotFoundError(_ProviderError):
+    """Shaped like anthropic.NotFoundError (unknown model id)."""
+
+
+class ResponseError(Exception):
+    """Shaped like ollama.ResponseError: no body, status_code, message already unwrapped."""
+
+    def __init__(self, error: str, status_code: int = -1) -> None:
+        super().__init__(error)
+        self.error = error
+        self.status_code = status_code
+
+    def __str__(self) -> str:
+        return f"{self.error} (status code: {self.status_code})"
+
+
+class ReadTimeout(Exception):
+    """Shaped like httpx.ReadTimeout: reaches us unwrapped, str() is empty, no status_code."""
+
+
+class ConnectTimeout(Exception):
+    """Shaped like httpx.ConnectTimeout - not a ConnectError subclass, so it needs its own name."""
+
+
+class RemoteProtocolError(Exception):
+    """Shaped like httpx.RemoteProtocolError (server dropped the connection mid-request)."""
+
+
+def _embedding_failure(exc: Exception):
+    """Wrap like mem0's _search_vector_store: EmbeddingError(...) from the provider error."""
+    try:
+        try:
+            raise exc
+        except Exception as e:
+            raise EmbeddingError(f"Query embedding failed: {e}") from e
+    except EmbeddingError:
+        return upstream_error()
+
+
+def test_httpx_read_timeout_maps_to_provider_timeout():
+    # The ollama client translates only ConnectError and HTTPStatusError; a read timeout
+    # propagates as the raw httpx exception, which is no builtin TimeoutError.
+    err = _map(ReadTimeout())
+    assert err.code == "provider_timeout"
+
+
+def test_httpx_connect_timeout_maps_to_provider_timeout():
+    err = _map(ConnectTimeout())
+    assert err.code == "provider_timeout"
+
+
+def test_wrapped_read_timeout_maps_to_provider_timeout():
+    err = _embedding_failure(ReadTimeout())
+    assert err.code == "provider_timeout"
+
+
+def test_dropped_connection_maps_to_provider_unavailable():
+    err = _embedding_failure(RemoteProtocolError("Server disconnected without sending a response."))
+    assert err.code == "provider_unavailable"
+
+
+def test_ollama_model_not_found_maps_to_provider_model_missing():
+    err = _embedding_failure(ResponseError('model "snowflake-arctic-embed2" not found', 404))
+    assert err.code == "provider_model_missing"
+    assert "snowflake-arctic-embed2" in err.detail
+    assert err.status_code == 502
+
+
+def test_provider_404_for_unknown_model_maps_to_provider_model_missing():
+    body = {"type": "error", "error": {"type": "not_found_error", "message": "model: claude-does-not-exist"}}
+    err = _map(NotFoundError(f"Error code: 404 - {body}", 404, body))
+    assert err.code == "provider_model_missing"
+    assert "claude-does-not-exist" in err.detail
+
+
+def test_http_layer_404_is_not_mistaken_for_a_missing_model():
+    # fastapi.HTTPException carries status_code too; only provider error types may match 404.
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str) -> None:
+            super().__init__(detail)
+            self.status_code = status_code
+
+    err = _map(HTTPException(404, "Memory not found."))
+    assert err.code == "unknown"
+
+
+def test_ollama_server_error_still_maps_to_provider_unavailable():
+    err = _embedding_failure(ResponseError("llama runner process has terminated", 500))
+    assert err.code == "provider_unavailable"

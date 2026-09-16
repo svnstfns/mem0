@@ -14,6 +14,10 @@ OPENAI_DEFAULT_LLM_MODEL = "gpt-5-mini"
 OPENAI_DEFAULT_EMBEDDER_MODEL = "text-embedding-3-small"
 OPENAI_DEFAULT_DIMS = 1536
 OLLAMA_DEFAULT_BASE_URL = "http://ollama:11434"
+# The ollama client sets no httpx timeout at all, so an unresponsive runtime would hang /search
+# forever. 60s leaves room for a cold model load into VRAM and still fails fast enough for the
+# keyword fallback to take over.
+OLLAMA_DEFAULT_EMBEDDER_TIMEOUT = 60.0
 API_KEY_VARS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
 
 
@@ -61,4 +65,5 @@ def embedder_from_env(env: Mapping[str, str], bundled: Tuple[str, ...]) -> Tuple
         config["api_key"] = env.get(API_KEY_VARS[provider])
     if provider == "ollama":
         config["ollama_base_url"] = env.get("OLLAMA_BASE_URL", OLLAMA_DEFAULT_BASE_URL)
+        config["ollama_timeout"] = float(env.get("MEM0_EMBEDDER_TIMEOUT") or OLLAMA_DEFAULT_EMBEDDER_TIMEOUT)
     return {"provider": provider, "config": config}, int(dims)

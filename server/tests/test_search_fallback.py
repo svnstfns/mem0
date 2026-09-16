@@ -171,3 +171,45 @@ def test_failing_keyword_search_maps_to_vector_store_unavailable():
         pytest.fail("keyword search failure was swallowed")
     assert err.code == "vector_store_unavailable"
     assert err.status_code == 502
+
+
+class ResponseError(Exception):
+    """Shaped like ollama.ResponseError."""
+
+    def __init__(self, error: str, status_code: int = -1) -> None:
+        super().__init__(error)
+        self.error = error
+        self.status_code = status_code
+
+    def __str__(self) -> str:
+        return f"{self.error} (status code: {self.status_code})"
+
+
+class ReadTimeout(Exception):
+    """Shaped like httpx.ReadTimeout - what a hung ollama produces once the client has a timeout."""
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ReadTimeout(), "provider_timeout"),
+        (ConnectionError("Failed to connect to Ollama."), "provider_unavailable"),
+        (ResponseError('model "snowflake-arctic-embed2" not found', 404), "provider_model_missing"),
+        (ResponseError("llama runner process has terminated", 500), "provider_unavailable"),
+    ],
+)
+def test_ollama_outages_fall_back(error, code):
+    # The ollama client raises a builtin ConnectionError for a refused connection and a
+    # ResponseError for any HTTP status; everything else surfaces as the raw httpx exception.
+    memory = FakeMemory(embed_error=error)
+    response = search_with_keyword_fallback(memory, "deploy", FILTERS)
+    assert response["degraded"]["code"] == code
+    assert [call["keyword_only"] for call in memory.calls] == [False, True]
+
+
+def test_missing_model_names_itself_in_the_degraded_object(caplog):
+    memory = FakeMemory(embed_error=ResponseError('model "snowflake-arctic-embed2" not found', 404))
+    with caplog.at_level(logging.WARNING):
+        response = search_with_keyword_fallback(memory, "deploy", FILTERS)
+    assert "snowflake-arctic-embed2" in response["degraded"]["detail"]
+    assert any("provider_model_missing" in record.getMessage() for record in caplog.records)
