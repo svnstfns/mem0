@@ -22,7 +22,7 @@ from mem0.configs.prompts import (
     PROCEDURAL_MEMORY_SYSTEM_PROMPT,
     generate_additive_extraction_prompt,
 )
-from mem0.exceptions import LLMError
+from mem0.exceptions import EmbeddingError, LLMError, VectorStoreError
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
 from mem0.memory.notices import (
@@ -449,6 +449,72 @@ def _payload_is_expired(payload: Optional[Dict[str, Any]]) -> bool:
         return date.fromisoformat(str(expiration_date)) < datetime.now(timezone.utc).date()
     except ValueError:
         return False
+
+
+def _rank_keyword_only(keyword_results, limit, show_expired, explain):
+    """Rank full-text matches for a search that runs without a query embedding.
+
+    Scores are the store's raw full-text rank (ts_rank_cd on pgvector), not cosine similarities,
+    so the semantic threshold does not apply; rank order and limit decide what is returned.
+    """
+    if keyword_results is None:
+        raise VectorStoreError("Keyword-only search failed or is not supported by this vector store.")
+    ranked = []
+    for mem in keyword_results:
+        payload = mem.payload or {}
+        if not show_expired and _payload_is_expired(payload):
+            continue
+        entry = {"id": str(mem.id), "score": mem.score, "payload": payload}
+        if explain:
+            entry["score_details"] = {"bm25_score": mem.score, "final_score": mem.score}
+        ranked.append(entry)
+    ranked.sort(key=lambda entry: entry["score"], reverse=True)
+    return ranked[:limit]
+
+
+def _format_search_results(scored_results, explain):
+    promoted_payload_keys = [
+        "user_id",
+        "agent_id",
+        "run_id",
+        "actor_id",
+        "role",
+        "attributed_to",
+        "expiration_date",
+    ]
+    core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+
+    original_memories = []
+    for scored in scored_results:
+        payload = scored.get("payload") or {}
+
+        if not payload.get("data"):
+            continue  # Skip candidates with no payload data
+
+        memory_item_dict = MemoryItem(
+            id=scored["id"],
+            memory=payload.get("data", ""),
+            hash=payload.get("hash"),
+            created_at=payload.get("created_at"),
+            updated_at=payload.get("updated_at"),
+            score=scored["score"],
+        ).model_dump()
+
+        for key in promoted_payload_keys:
+            if key in payload:
+                memory_item_dict[key] = payload[key]
+
+        additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
+        if additional_metadata:
+            if not memory_item_dict.get("metadata"):
+                memory_item_dict["metadata"] = {}
+            memory_item_dict["metadata"].update(additional_metadata)
+        if explain and "score_details" in scored:
+            memory_item_dict["score_details"] = scored["score_details"]
+
+        original_memories.append(memory_item_dict)
+
+    return original_memories
 
 
 setup_config()
@@ -1387,6 +1453,7 @@ class Memory(MemoryBase):
         explain: bool = False,
         reference_date: Optional[Any] = None,
         show_expired: bool = False,
+        keyword_only: bool = False,
         **kwargs,
     ):
         """
@@ -1420,6 +1487,9 @@ class Memory(MemoryBase):
             explain (bool, optional): Whether to include score_details for each result. Defaults to False.
             reference_date (Any, optional): Platform-only temporal parameter. Not supported in OSS.
             show_expired (bool, optional): Include expired memories. Defaults to False.
+            keyword_only (bool, optional): Skip the query embedding and rank full-text matches on any
+                query term instead (needs a vector store with keyword_search, e.g. pgvector). Scores are
+                raw full-text ranks, so threshold does not apply. Defaults to False.
 
         Returns:
             dict: A dictionary containing the search results under a "results" key.
@@ -1492,7 +1562,13 @@ class Memory(MemoryBase):
 
         search_start = time.perf_counter()
         original_memories = self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain, show_expired=show_expired
+            query,
+            effective_filters,
+            limit,
+            threshold,
+            explain=explain,
+            show_expired=show_expired,
+            keyword_only=keyword_only,
         )
         search_elapsed_seconds = time.perf_counter() - search_start
 
@@ -1625,17 +1701,31 @@ class Memory(MemoryBase):
                 return True
         return False
 
-    def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False):
+    def _search_vector_store(
+        self, query, filters, limit, threshold=0.1, explain=False, show_expired=False, keyword_only=False
+    ):
         # Guard against None threshold (backward compat)
         if threshold is None:
             threshold = 0.1
 
         # Step 1: Preprocess query
         query_lemmatized = lemmatize_for_bm25(query)
+
+        if keyword_only:
+            # No query embedding available: rank full-text matches on any query term alone.
+            keyword_results = self.vector_store.keyword_search(
+                query=query_lemmatized, top_k=max(limit * 4, 60), filters=filters, match_any=True
+            )
+            return _format_search_results(_rank_keyword_only(keyword_results, limit, show_expired, explain), explain)
+
         query_entities = extract_entities(query)
 
         # Step 2: Embed query
-        embeddings = self.embedding_model.embed(query, "search")
+        try:
+            embeddings = self.embedding_model.embed(query, "search")
+        except Exception as e:
+            # Typed so callers can detect an embedder outage and retry with keyword_only=True.
+            raise EmbeddingError(f"Query embedding failed: {e}") from e
 
         # Step 3: Semantic search (over-fetch for scoring pool)
         internal_limit = max(limit * 4, 60)
@@ -1686,49 +1776,7 @@ class Memory(MemoryBase):
             explain=explain,
         )
 
-        # Step 9: Format results
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-            "attributed_to",
-            "expiration_date",
-        ]
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
-
-        original_memories = []
-        for scored in scored_results:
-            payload = scored.get("payload") or {}
-
-            if not payload.get("data"):
-                continue  # Skip candidates with no payload data
-
-            memory_item_dict = MemoryItem(
-                id=scored["id"],
-                memory=payload.get("data", ""),
-                hash=payload.get("hash"),
-                created_at=payload.get("created_at"),
-                updated_at=payload.get("updated_at"),
-                score=scored["score"],
-            ).model_dump()
-
-            for key in promoted_payload_keys:
-                if key in payload:
-                    memory_item_dict[key] = payload[key]
-
-            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
-            if additional_metadata:
-                if not memory_item_dict.get("metadata"):
-                    memory_item_dict["metadata"] = {}
-                memory_item_dict["metadata"].update(additional_metadata)
-            if explain and "score_details" in scored:
-                memory_item_dict["score_details"] = scored["score_details"]
-
-            original_memories.append(memory_item_dict)
-
-        return original_memories
+        return _format_search_results(scored_results, explain)
 
     def _compute_entity_boosts(self, query_entities, filters):
         """Compute per-memory entity boosts from entity store search.
@@ -3045,6 +3093,7 @@ class AsyncMemory(MemoryBase):
         explain: bool = False,
         reference_date: Optional[Any] = None,
         show_expired: bool = False,
+        keyword_only: bool = False,
         **kwargs,
     ):
         """
@@ -3078,6 +3127,9 @@ class AsyncMemory(MemoryBase):
             explain (bool, optional): Whether to include score_details for each result. Defaults to False.
             reference_date (Any, optional): Platform-only temporal parameter. Not supported in OSS.
             show_expired (bool, optional): Include expired memories. Defaults to False.
+            keyword_only (bool, optional): Skip the query embedding and rank full-text matches on any
+                query term instead (needs a vector store with keyword_search, e.g. pgvector). Scores are
+                raw full-text ranks, so threshold does not apply. Defaults to False.
 
         Returns:
             dict: A dictionary containing the search results under a "results" key.
@@ -3154,7 +3206,13 @@ class AsyncMemory(MemoryBase):
 
         search_start = time.perf_counter()
         original_memories = await self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain, show_expired=show_expired
+            query,
+            effective_filters,
+            limit,
+            threshold,
+            explain=explain,
+            show_expired=show_expired,
+            keyword_only=keyword_only,
         )
         search_elapsed_seconds = time.perf_counter() - search_start
 
@@ -3290,16 +3348,33 @@ class AsyncMemory(MemoryBase):
                 return True
         return False
 
-    async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False):
+    async def _search_vector_store(
+        self, query, filters, limit, threshold=0.1, explain=False, show_expired=False, keyword_only=False
+    ):
         if threshold is None:
             threshold = 0.1
 
         # Step 1: Preprocess query (CPU-bound)
         query_lemmatized = await asyncio.to_thread(lemmatize_for_bm25, query)
+
+        if keyword_only:
+            # No query embedding available: rank full-text matches on any query term alone.
+            keyword_results = await asyncio.to_thread(
+                self.vector_store.keyword_search,
+                query=query_lemmatized,
+                top_k=max(limit * 4, 60),
+                filters=filters,
+                match_any=True,
+            )
+            return _format_search_results(_rank_keyword_only(keyword_results, limit, show_expired, explain), explain)
+
         query_entities = await asyncio.to_thread(extract_entities, query)
 
         # Step 2: Embed query
-        embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+        try:
+            embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+        except Exception as e:
+            raise EmbeddingError(f"Query embedding failed: {e}") from e
 
         # Step 3: Semantic search (over-fetch)
         internal_limit = max(limit * 4, 60)
@@ -3350,48 +3425,7 @@ class AsyncMemory(MemoryBase):
             explain=explain,
         )
 
-        # Step 9: Format results
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-            "attributed_to",
-            "expiration_date",
-        ]
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
-
-        original_memories = []
-        for scored in scored_results:
-            payload = scored.get("payload") or {}
-            if not payload.get("data"):
-                continue
-
-            memory_item_dict = MemoryItem(
-                id=scored["id"],
-                memory=payload.get("data", ""),
-                hash=payload.get("hash"),
-                created_at=payload.get("created_at"),
-                updated_at=payload.get("updated_at"),
-                score=scored["score"],
-            ).model_dump()
-
-            for key in promoted_payload_keys:
-                if key in payload:
-                    memory_item_dict[key] = payload[key]
-
-            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
-            if additional_metadata:
-                if not memory_item_dict.get("metadata"):
-                    memory_item_dict["metadata"] = {}
-                memory_item_dict["metadata"].update(additional_metadata)
-            if explain and "score_details" in scored:
-                memory_item_dict["score_details"] = scored["score_details"]
-
-            original_memories.append(memory_item_dict)
-
-        return original_memories
+        return _format_search_results(scored_results, explain)
 
     async def _compute_entity_boosts_async(self, query_entities, filters):
         """Async version of entity boost computation."""

@@ -22,12 +22,21 @@ _TIMEOUT_NAMES = {"APITimeoutError"}
 _CONN_NAMES = {"APIConnectionError", "ConnectionError"}
 _BAD_REQUEST_NAMES = {"BadRequestError", "UnprocessableEntityError"}
 _DB_NAMES = {"OperationalError", "DBAPIError", "DisconnectionError"}
-_VECTOR_NAMES = {"UnexpectedResponse", "ResponseHandlingException"}
+_VECTOR_NAMES = {"UnexpectedResponse", "ResponseHandlingException", "VectorStoreError"}
 
 # Marks a provider 4xx as a billing/credit problem rather than a malformed request
 # (Anthropic 400: "Your credit balance is too low ... Plans & Billing"; OpenAI 429:
-# code "insufficient_quota", "... check your plan and billing details").
-_BILLING_MARKERS = ("credit balance", "insufficient_quota", "billing", "purchase credits", "payment required")
+# code "insufficient_quota", "... check your plan and billing details"; OpenAI 429 on
+# embeddings: code "credit_balance_exhausted", "You have no credits remaining ...").
+_BILLING_MARKERS = (
+    "credit balance",
+    "credit_balance_exhausted",
+    "no credits remaining",
+    "insufficient_quota",
+    "billing",
+    "purchase credits",
+    "payment required",
+)
 _PROVIDER_MESSAGE_LIMIT = 300
 
 
@@ -89,7 +98,7 @@ def _classify_one(exc: BaseException) -> tuple[str, str]:
     return ("unknown", "Upstream provider error.")
 
 
-def _classify(exc: BaseException | None) -> tuple[str, str]:
+def classify(exc: BaseException | None) -> tuple[str, str]:
     # Walk the cause/context chain so wrapped provider errors still classify correctly.
     seen: set[int] = set()
     current = exc
@@ -112,7 +121,7 @@ def new_request_id() -> str:
 
 def upstream_error() -> UpstreamError:
     exc = sys.exc_info()[1]
-    code, message = _classify(exc)
+    code, message = classify(exc)
     rid = request_id_var.get()
     logging.exception("Upstream provider error (code=%s)", code)
     return UpstreamError(code=code, detail=message, request_id=rid)
