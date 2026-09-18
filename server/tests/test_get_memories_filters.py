@@ -1,7 +1,7 @@
 """Tests for the metadata filters of GET /memories (kind, scope, project, glossary).
 
-main.py is loaded with a patched Memory.from_config, the way tests/test_server_auth.py does it;
-the Memory instance is a MagicMock that records which filters the handler asked for.
+main.py is loaded with a patched Memory.from_config; the Memory instance is a
+MagicMock that records which filters the handler asked for.
 """
 
 import importlib
