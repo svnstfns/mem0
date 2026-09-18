@@ -403,8 +403,8 @@ def _serialize_memory(row: Any) -> Dict[str, Any]:
     }
 
 
-def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:
-    results = get_memory_instance().vector_store.list(top_k=limit)
+def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    results = get_memory_instance().vector_store.list(filters=filters, top_k=limit)
     rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
     return {"results": [_serialize_memory(row) for row in rows]}
 
@@ -415,21 +415,38 @@ def get_all_memories(
     user_id: Optional[str] = None,
     run_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    kind: Optional[str] = Query(None, description="Only memories whose metadata `kind` equals this value."),
+    scope: Optional[str] = Query(None, description="Only memories whose metadata `scope` equals this value."),
+    project: Optional[str] = Query(None, description="Only memories whose metadata `project` equals this value."),
+    glossary: Optional[bool] = Query(None, description="Only memories whose metadata `glossary` equals this value."),
     top_k: Optional[int] = Query(None, ge=0, le=ALL_MEMORIES_LIMIT),
     show_expired: bool = Query(False),
     _auth=Depends(verify_auth),
 ):
-    """Retrieve stored memories. Lists all memories when no identifier is provided (admin only)."""
+    """Retrieve stored memories. Lists all memories when no identifier is provided (admin only).
+
+    `kind`, `scope`, `project` and `glossary` narrow the list to exact matches on the stored
+    metadata, so a client after a small typed subset does not have to page through the whole
+    store up to ALL_MEMORIES_LIMIT.
+    """
+    metadata_filters = {
+        key: value
+        for key, value in {"kind": kind, "scope": scope, "project": project, "glossary": glossary}.items()
+        if value is not None and value != ""
+    }
     try:
         if not any([user_id, run_id, agent_id]):
             auth_type = getattr(request.state, "auth_type", "none")
             if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
                 raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
             # Admin all-memory listing is intentionally raw; scoped get_all below applies expiry visibility.
-            return _list_all_memories(limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT)
+            return _list_all_memories(
+                limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT, filters=metadata_filters or None
+            )
         filters = {
             k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v
         }
+        filters.update(metadata_filters)
         params = {"filters": filters}
         if top_k is not None:
             params["top_k"] = top_k
