@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -8,14 +8,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { DataTable } from "@/components/shared/data-table";
+import {
+  FilterDropdown,
+  FilterOption,
+} from "@/components/shared/filter-dropdown";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
 import { EmptyState } from "@/components/self-hosted/empty-state";
 import DeleteConfirmationModal from "@/components/ui/delete-confirmation-modal";
@@ -59,9 +56,41 @@ function metaTopics(m: Memory): string[] {
   return Array.isArray(v) ? v.map(String) : [];
 }
 
+function metaKind(m: Memory): string[] {
+  const kind = metaStr(m, "kind");
+  return kind ? [kind] : [];
+}
+
+// Mirrors the Project column: `project`, or "global" for scope=global memories. A global
+// memory additionally counts under `session_project`, the session that produced it.
+function metaProjects(m: Memory): string[] {
+  const keys: string[] = [];
+  const project = metaStr(m, "project") || metaStr(m, "session_project");
+  if (project) keys.push(project);
+  if (metaStr(m, "scope") === "global") keys.push("global");
+  return keys;
+}
+
+function facetOptions(
+  memories: Memory[],
+  keysOf: (m: Memory) => string[],
+  selected: string,
+): FilterOption[] {
+  const counts = new Map<string, number>();
+  for (const m of memories) {
+    for (const key of new Set(keysOf(m))) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  if (selected && !counts.has(selected)) counts.set(selected, 0);
+  return Array.from(counts, ([value, count]) => ({ value, count })).sort(
+    (a, b) => b.count - a.count || a.value.localeCompare(b.value),
+  );
+}
+
 export default function MemoriesPage() {
   const [userId, setUserId] = useState("");
-  const [kindFilter, setKindFilter] = useState("all");
+  const [kindFilter, setKindFilter] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
   const [topicFilter, setTopicFilter] = useState("");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
@@ -86,21 +115,37 @@ export default function MemoriesPage() {
     { errorToast: "Failed to load memories", initialData: [] },
   );
 
-  const kinds = Array.from(
-    new Set(memories.map((m) => metaStr(m, "kind")).filter(Boolean)),
-  ).sort();
-  const filteredMemories = memories.filter((m) => {
-    if (kindFilter !== "all" && metaStr(m, "kind") !== kindFilter) return false;
-    const project = projectFilter.trim().toLowerCase();
-    if (project) {
-      const own = metaStr(m, "project") || metaStr(m, "session_project");
-      if (!own.toLowerCase().includes(project)) return false;
-    }
-    const topic = topicFilter.trim().toLowerCase();
-    if (topic && !metaTopics(m).some((t) => t.toLowerCase().includes(topic)))
-      return false;
-    return true;
-  });
+  // Each dropdown lists only the values that occur under the other two filters, so a chosen
+  // project narrows the topics on offer (and vice versa). The current selection stays listed.
+  const { kindOptions, projectOptions, topicOptions, filteredMemories } =
+    useMemo(() => {
+      const byKind = (m: Memory) =>
+        !kindFilter || metaKind(m).includes(kindFilter);
+      const byProject = (m: Memory) =>
+        !projectFilter || metaProjects(m).includes(projectFilter);
+      const byTopic = (m: Memory) =>
+        !topicFilter || metaTopics(m).includes(topicFilter);
+      return {
+        kindOptions: facetOptions(
+          memories.filter((m) => byProject(m) && byTopic(m)),
+          metaKind,
+          kindFilter,
+        ),
+        projectOptions: facetOptions(
+          memories.filter((m) => byKind(m) && byTopic(m)),
+          metaProjects,
+          projectFilter,
+        ),
+        topicOptions: facetOptions(
+          memories.filter((m) => byKind(m) && byProject(m)),
+          metaTopics,
+          topicFilter,
+        ),
+        filteredMemories: memories.filter(
+          (m) => byKind(m) && byProject(m) && byTopic(m),
+        ),
+      };
+    }, [memories, kindFilter, projectFilter, topicFilter]);
   useEffect(() => {
     if (!selectedMemory) {
       setRelated([]);
@@ -215,7 +260,7 @@ export default function MemoriesPage() {
         />
       )}
 
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         <Input
           placeholder="Filter by User ID (optional)"
           value={userId}
@@ -228,42 +273,38 @@ export default function MemoriesPage() {
           }}
           className="w-64"
         />
-        <Select
+        <FilterDropdown
+          options={kindOptions}
           value={kindFilter}
-          onValueChange={(v) => {
+          onChange={(v) => {
             setKindFilter(v);
             setPage(0);
           }}
-        >
-          <SelectTrigger className="w-40">
-            <SelectValue placeholder="Kind" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All kinds</SelectItem>
-            {kinds.map((k) => (
-              <SelectItem key={k} value={k}>
-                {k}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Input
-          placeholder="Filter by project"
-          value={projectFilter}
-          onChange={(e) => {
-            setProjectFilter(e.target.value);
-            setPage(0);
-          }}
-          className="w-48"
-        />
-        <Input
-          placeholder="Filter by topic"
-          value={topicFilter}
-          onChange={(e) => {
-            setTopicFilter(e.target.value);
-            setPage(0);
-          }}
+          allLabel="All kinds"
+          searchPlaceholder="Search kinds"
           className="w-40"
+        />
+        <FilterDropdown
+          options={projectOptions}
+          value={projectFilter}
+          onChange={(v) => {
+            setProjectFilter(v);
+            setPage(0);
+          }}
+          allLabel="All projects"
+          searchPlaceholder="Search projects"
+          className="w-52"
+        />
+        <FilterDropdown
+          options={topicOptions}
+          value={topicFilter}
+          onChange={(v) => {
+            setTopicFilter(v);
+            setPage(0);
+          }}
+          allLabel="All topics"
+          searchPlaceholder="Search topics"
+          className="w-48"
         />
       </div>
 
@@ -428,7 +469,11 @@ export default function MemoriesPage() {
                           <Badge variant="outline" className="text-[10px] mr-1">
                             {r.outgoing ? `${r.relation} →` : `← ${r.relation}`}
                           </Badge>
-                          <span className={r.expired ? "line-through opacity-60" : ""}>
+                          <span
+                            className={
+                              r.expired ? "line-through opacity-60" : ""
+                            }
+                          >
                             {r.snippet ?? r.id}
                           </span>
                         </button>
